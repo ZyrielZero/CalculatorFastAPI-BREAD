@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Register</title>
+    <style>
+        body { font-family: system-ui, sans-serif; max-width: 420px; margin: 3rem auto; padding: 0 1rem; }
+        h1 { font-size: 1.5rem; }
+        label { display: block; margin-top: 1rem; font-weight: 600; }
+        input { width: 100%; padding: 0.5rem; margin-top: 0.25rem; box-sizing: border-box; }
+        button { margin-top: 1.5rem; padding: 0.6rem 1.4rem; cursor: pointer; }
+        .message { margin-top: 1rem; padding: 0.6rem; border-radius: 4px; display: none; }
+        #error { background: #fdecea; color: #b3261e; }
+        #success { background: #e6f4ea; color: #1e7e34; }
+        a { color: #0b57d0; }
+    </style>
+</head>
+<body>
+    <h1>Create an account</h1>
+
+    <!--
+        Plain elements with ids rather than a <form> submit: the JS below
+        owns validation and the fetch call, so nothing here should trigger
+        a browser-native form submission or page reload.
+    -->
+    <label for="username">Username</label>
+    <input id="username" type="text" autocomplete="username">
+
+    <label for="email">Email</label>
+    <input id="email" type="email" autocomplete="email">
+
+    <label for="password">Password</label>
+    <input id="password" type="password" autocomplete="new-password">
+
+    <label for="confirm">Confirm password</label>
+    <input id="confirm" type="password" autocomplete="new-password">
+
+    <button id="submit" type="button">Register</button>
+
+    <!-- E2E tests assert against these two divs by id. -->
+    <div id="error" class="message"></div>
+    <div id="success" class="message"></div>
+
+    <p>Already registered? <a href="/login">Log in</a></p>
+
+    <script>
+        // Client-side rules deliberately mirror app/schemas/user.py
+        // (UserCreate). The server remains the authority — these checks
+        // exist to fail fast in the browser, not to replace Pydantic.
+        const USERNAME_RE = /^[A-Za-z0-9_]{3,40}$/;
+        const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+        function validate(username, email, password, confirm) {
+            if (!USERNAME_RE.test(username)) {
+                return "Username must be 3-40 characters: letters, digits, underscore.";
+            }
+            if (!EMAIL_RE.test(email)) {
+                return "Enter a valid email address.";
+            }
+            if (password.length < 8) {
+                return "Password must be at least 8 characters.";
+            }
+            if (password === password.toLowerCase() || password === password.toUpperCase()) {
+                return "Password must mix upper and lower case.";
+            }
+            if (![...password].some(ch => ch >= "0" && ch <= "9")) {
+                return "Password must include at least one digit.";
+            }
+            if (password !== confirm) {
+                return "Passwords do not match.";
+            }
+            return null;
+        }
+
+        function show(el, text) {
+            el.textContent = text;
+            el.style.display = "block";
+        }
+
+        function hide(el) {
+            el.style.display = "none";
+        }
+
+        document.getElementById("submit").addEventListener("click", async () => {
+            const errorBox = document.getElementById("error");
+            const successBox = document.getElementById("success");
+            hide(errorBox);
+            hide(successBox);
+
+            const username = document.getElementById("username").value.trim();
+            const email = document.getElementById("email").value.trim();
+            const password = document.getElementById("password").value;
+            const confirm = document.getElementById("confirm").value;
+
+            // Client-side gate: invalid input never reaches the network.
+            const problem = validate(username, email, password, confirm);
+            if (problem) {
+                show(errorBox, problem);
+                return;
+            }
+
+            try {
+                const response = await fetch("/users/register", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ username, email, password }),
+                });
+
+                if (response.status === 201) {
+                    show(successBox, "Registration successful. You can now log in.");
+                    return;
+                }
+
+                // 409 duplicates and 400/422 validation errors both land
+                // here; surface whatever detail the server provided.
+                const body = await response.json();
+                show(errorBox, body.error || body.detail || "Registration failed.");
+            } catch (err) {
+                show(errorBox, "Network error - please try again.");
+            }
+        });
+    </script>
+</body>
+</html>

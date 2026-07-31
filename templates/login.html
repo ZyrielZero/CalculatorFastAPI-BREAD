@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Log in</title>
+    <style>
+        body { font-family: system-ui, sans-serif; max-width: 420px; margin: 3rem auto; padding: 0 1rem; }
+        h1 { font-size: 1.5rem; }
+        label { display: block; margin-top: 1rem; font-weight: 600; }
+        input { width: 100%; padding: 0.5rem; margin-top: 0.25rem; box-sizing: border-box; }
+        button { margin-top: 1.5rem; padding: 0.6rem 1.4rem; cursor: pointer; }
+        .message { margin-top: 1rem; padding: 0.6rem; border-radius: 4px; display: none; }
+        #error { background: #fdecea; color: #b3261e; }
+        #success { background: #e6f4ea; color: #1e7e34; }
+        a { color: #0b57d0; }
+    </style>
+</head>
+<body>
+    <h1>Log in</h1>
+
+    <label for="identifier">Username or email</label>
+    <input id="identifier" type="text" autocomplete="username">
+
+    <label for="password">Password</label>
+    <input id="password" type="password" autocomplete="current-password">
+
+    <button id="submit" type="button">Log in</button>
+
+    <!-- E2E tests assert against these two divs by id. -->
+    <div id="error" class="message"></div>
+    <div id="success" class="message"></div>
+
+    <p>Need an account? <a href="/register">Register</a></p>
+
+    <script>
+        function show(el, text) {
+            el.textContent = text;
+            el.style.display = "block";
+        }
+
+        function hide(el) {
+            el.style.display = "none";
+        }
+
+        // Spend the token on a protected endpoint. /calculations rejects
+        // anything without a valid bearer header with a 401, so a numeric
+        // answer here proves the stored JWT actually authenticates.
+        // Module 14 builds the full BREAD UI on top of this call.
+        async function loadCalculationCount(token) {
+            try {
+                const response = await fetch("/calculations", {
+                    headers: { Authorization: `Bearer ${token}` },
+                });
+                if (!response.ok) {
+                    return null;
+                }
+                const rows = await response.json();
+                return rows.length;
+            } catch (err) {
+                return null;
+            }
+        }
+
+        document.getElementById("submit").addEventListener("click", async () => {
+            const errorBox = document.getElementById("error");
+            const successBox = document.getElementById("success");
+            hide(errorBox);
+            hide(successBox);
+
+            const identifier = document.getElementById("identifier").value.trim();
+            const password = document.getElementById("password").value;
+
+            // Minimal client-side checks per the assignment: just make
+            // sure both fields are present before hitting the network.
+            if (!identifier || !password) {
+                show(errorBox, "Both fields are required.");
+                return;
+            }
+
+            // /users/login consumes the OAuth2 password form, so this is
+            // form-encoded rather than JSON - the same content type
+            // Swagger's Authorize button sends.
+            const form = new URLSearchParams();
+            form.set("username", identifier);
+            form.set("password", password);
+
+            try {
+                const response = await fetch("/users/login", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+                    body: form,
+                });
+
+                if (response.ok) {
+                    const body = await response.json();
+                    // The rubric's token-handling requirement: persist the
+                    // JWT, then immediately spend it on a real authenticated
+                    // request so storage is demonstrably useful, not just
+                    // written and forgotten.
+                    localStorage.setItem("access_token", body.access_token);
+                    const count = await loadCalculationCount(body.access_token);
+                    if (count === null) {
+                        show(successBox, "Login successful.");
+                    } else {
+                        show(successBox, `Login successful. Loaded ${count} saved calculations.`);
+                    }
+                    return;
+                }
+
+                if (response.status === 401) {
+                    show(errorBox, "Invalid credentials.");
+                    return;
+                }
+
+                const body = await response.json();
+                show(errorBox, body.error || body.detail || "Login failed.");
+            } catch (err) {
+                show(errorBox, "Network error - please try again.");
+            }
+        });
+    </script>
+</body>
+</html>
