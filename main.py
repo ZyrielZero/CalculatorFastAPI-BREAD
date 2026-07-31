@@ -97,6 +97,17 @@ async def login_page(request: Request):
     """
     return templates.TemplateResponse(request, "login.html")
 
+@app.get("/dashboard")
+async def dashboard_page(request: Request):
+    """
+    Serve the calculations dashboard. The page is a static shell; the
+    token lives in localStorage and only the browser can read it, so the
+    auth check happens client-side and the server has nothing to gate
+    here. Every piece of data the page shows arrives through the
+    bearer-authenticated /calculations API.
+    """
+    return templates.TemplateResponse(request, "dashboard.html")
+
 @app.post("/add", response_model=OperationResponse, responses={400: {"model": ErrorResponse}})
 async def add_route(operation: OperationRequest):
     """

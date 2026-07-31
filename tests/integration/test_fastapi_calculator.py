@@ -27,6 +27,15 @@ def test_homepage_serves_template(client):
     assert 'Hello World' in response.text
 
 
+def test_homepage_links_to_auth_and_dashboard(client):
+    """The landing page must offer a click path into the rest of the
+    site — without these links, /register, /login, and /dashboard are
+    reachable only by typing URLs."""
+    response = client.get('/')
+    for href in ('href="/register"', 'href="/login"', 'href="/dashboard"'):
+        assert href in response.text
+
+
 @pytest.mark.parametrize(
     "endpoint, a, b, expected",
     [

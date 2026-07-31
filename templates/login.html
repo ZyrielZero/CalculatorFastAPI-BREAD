@@ -31,6 +31,12 @@
     <div id="error" class="message"></div>
     <div id="success" class="message"></div>
 
+    <!-- Revealed only after a successful login; Module 14's BREAD UI
+         lives behind it and needs the token this page just stored. -->
+    <p id="dashboard-nav" style="display: none;">
+        <a id="dashboard-link" href="/dashboard">Go to my calculations</a>
+    </p>
+
     <p>Need an account? <a href="/register">Register</a></p>
 
     <script>
@@ -99,6 +105,7 @@
                     // request so storage is demonstrably useful, not just
                     // written and forgotten.
                     localStorage.setItem("access_token", body.access_token);
+                    document.getElementById("dashboard-nav").style.display = "block";
                     const count = await loadCalculationCount(body.access_token);
                     if (count === null) {
                         show(successBox, "Login successful.");

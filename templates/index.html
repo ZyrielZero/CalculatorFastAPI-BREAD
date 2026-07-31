@@ -116,6 +116,18 @@
     -->
     
     <h1>Hello World</h1>
+
+    <!--
+        Site navigation. The Module 11 e2e test asserts the h1 text above,
+        so the nav sits below it and adds no heading of its own. The
+        dashboard link works only once a login has stored a token; the
+        page itself redirects unauthenticated visitors back to /login.
+    -->
+    <nav>
+        <a href="/register">Register</a> |
+        <a href="/login">Log in</a> |
+        <a href="/dashboard">My calculations</a>
+    </nav>
     <!--
         <h1> Tag: Heading
         

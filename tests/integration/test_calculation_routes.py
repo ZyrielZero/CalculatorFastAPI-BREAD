@@ -300,3 +300,21 @@ def test_patch_foreign_row_is_404(client, alice, bob):
 def test_patch_requires_authentication(client):
     response = client.patch(f"/calculations/{uuid.uuid4()}", json={"a": 1})
     assert response.status_code == 401
+
+
+def test_dashboard_page_serves_template(client):
+    """GET /dashboard renders the BREAD shell with every element id the
+    client-side script and the e2e tests target."""
+    response = client.get("/dashboard")
+    assert response.status_code == 200
+    for element_id in (
+        'id="add-a"',
+        'id="add-b"',
+        'id="add-type"',
+        'id="add-submit"',
+        'id="rows"',
+        'id="detail"',
+        'id="edit-panel"',
+        'id="logout"',
+    ):
+        assert element_id in response.text

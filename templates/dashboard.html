@@ -1,0 +1,452 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>My calculations</title>
+    <style>
+        body { font-family: system-ui, sans-serif; max-width: 760px; margin: 2rem auto; padding: 0 1rem; }
+        h1 { font-size: 1.5rem; }
+        h2 { font-size: 1.1rem; margin-top: 2rem; }
+        header { display: flex; justify-content: space-between; align-items: baseline; }
+        label { display: block; margin-top: 0.75rem; font-weight: 600; }
+        input, select { padding: 0.4rem; box-sizing: border-box; }
+        input { width: 10rem; }
+        button { padding: 0.4rem 1rem; cursor: pointer; }
+        #add-submit, #edit-save { margin-top: 1rem; }
+        table { width: 100%; border-collapse: collapse; margin-top: 0.75rem; }
+        th, td { text-align: left; padding: 0.4rem; border-bottom: 1px solid #ddd; }
+        .message { margin-top: 1rem; padding: 0.6rem; border-radius: 4px; display: none; }
+        #error { background: #fdecea; color: #b3261e; }
+        #success { background: #e6f4ea; color: #1e7e34; }
+        .panel { display: none; margin-top: 1rem; padding: 0.75rem; border: 1px solid #ccc; border-radius: 4px; }
+        .row-actions button { margin-right: 0.3rem; }
+        a { color: #0b57d0; }
+    </style>
+</head>
+<body>
+    <header>
+        <h1>My calculations</h1>
+        <button id="logout" type="button">Log out</button>
+    </header>
+
+    <!--
+        Every panel below is plain markup with ids; the script owns all
+        state, validation, and fetching. No <form> submits, so nothing
+        here can trigger a page reload mid-operation.
+    -->
+
+    <h2>Add a calculation</h2>
+    <label for="add-a">First operand</label>
+    <input id="add-a" type="number" step="any">
+
+    <label for="add-type">Operation</label>
+    <select id="add-type">
+        <option value="add">add</option>
+        <option value="sub">sub</option>
+        <option value="multiply">multiply</option>
+        <option value="divide">divide</option>
+    </select>
+
+    <label for="add-b">Second operand</label>
+    <input id="add-b" type="number" step="any">
+
+    <br>
+    <button id="add-submit" type="button">Add</button>
+
+    <!-- E2E tests assert against these two divs by id. -->
+    <div id="error" class="message"></div>
+    <div id="success" class="message"></div>
+
+    <h2>All calculations</h2>
+    <p id="empty">No calculations yet.</p>
+    <table id="table" hidden>
+        <thead>
+            <tr><th>Expression</th><th>Result</th><th>Actions</th></tr>
+        </thead>
+        <tbody id="rows"></tbody>
+    </table>
+
+    <div id="detail" class="panel">
+        <strong>Calculation detail</strong>
+        <p id="detail-expr"></p>
+        <p id="detail-result"></p>
+        <p id="detail-id"></p>
+        <p id="detail-created"></p>
+        <button id="detail-close" type="button">Close</button>
+    </div>
+
+    <div id="edit-panel" class="panel">
+        <strong>Edit calculation</strong>
+        <p id="edit-target"></p>
+
+        <label for="edit-a">First operand</label>
+        <input id="edit-a" type="number" step="any">
+
+        <label for="edit-type">Operation</label>
+        <select id="edit-type">
+            <option value="add">add</option>
+            <option value="sub">sub</option>
+            <option value="multiply">multiply</option>
+            <option value="divide">divide</option>
+        </select>
+
+        <label for="edit-b">Second operand</label>
+        <input id="edit-b" type="number" step="any">
+
+        <br>
+        <button id="edit-save" type="button">Save changes</button>
+        <button id="edit-cancel" type="button">Cancel</button>
+    </div>
+
+    <p><a href="/">Back to the calculator</a></p>
+
+    <script>
+        const OPERATIONS = ["add", "sub", "multiply", "divide"];
+        const SYMBOL = { add: "+", sub: "-", multiply: "x", divide: "/" };
+
+        const errorBox = document.getElementById("error");
+        const successBox = document.getElementById("success");
+
+        // The row currently loaded into the edit panel, kept so the
+        // PATCH can send only the fields that actually changed.
+        let editing = null;
+
+        function show(el, text) {
+            el.textContent = text;
+            el.style.display = "block";
+        }
+
+        function hide(el) {
+            el.style.display = "none";
+        }
+
+        function clearMessages() {
+            hide(errorBox);
+            hide(successBox);
+        }
+
+        function token() {
+            return localStorage.getItem("access_token");
+        }
+
+        // Guard: an unauthenticated visitor never sees the page shell in
+        // a half-loaded state, they go straight back to the login form.
+        if (!token()) {
+            window.location.replace("/login");
+        }
+
+        function logout() {
+            localStorage.removeItem("access_token");
+            window.location.replace("/login");
+        }
+
+        // Any 401 mid-session means the token expired or was revoked;
+        // treat it exactly like a logout rather than showing a raw error.
+        async function api(path, options) {
+            const config = options || {};
+            const headers = Object.assign(
+                { Authorization: "Bearer " + token() },
+                config.headers || {}
+            );
+            const response = await fetch(path, Object.assign({}, config, { headers: headers }));
+            if (response.status === 401) {
+                logout();
+                throw new Error("unauthorized");
+            }
+            return response;
+        }
+
+        async function errorTextOf(response) {
+            try {
+                const body = await response.json();
+                return body.error || body.detail || "Request failed.";
+            } catch (err) {
+                return "Request failed.";
+            }
+        }
+
+        // --- client-side validation ------------------------------------
+        // These rules mirror app/schemas/calculation.py. The server is
+        // still the authority; this exists so an obviously bad payload
+        // never costs a round trip.
+        function validateOperands(rawA, rawB, type) {
+            if (rawA.trim() === "" || rawB.trim() === "") {
+                return "Both operands are required.";
+            }
+            const a = Number(rawA);
+            const b = Number(rawB);
+            if (!Number.isFinite(a) || !Number.isFinite(b)) {
+                return "Both operands must be numbers.";
+            }
+            if (!OPERATIONS.includes(type)) {
+                return "Choose a valid operation.";
+            }
+            if (type === "divide" && b === 0) {
+                return "Cannot divide by zero.";
+            }
+            return null;
+        }
+
+        // --- Browse -----------------------------------------------------
+        function describe(row) {
+            return row.a + " " + SYMBOL[row.type] + " " + row.b;
+        }
+
+        function renderRows(rows) {
+            const tbody = document.getElementById("rows");
+            const table = document.getElementById("table");
+            const empty = document.getElementById("empty");
+            tbody.innerHTML = "";
+
+            table.hidden = rows.length === 0;
+            empty.hidden = rows.length > 0;
+
+            rows.forEach(function (row) {
+                const tr = document.createElement("tr");
+                tr.dataset.id = row.id;
+                tr.className = "calc-row";
+
+                const expr = document.createElement("td");
+                expr.className = "cell-expr";
+                expr.textContent = describe(row);
+
+                const result = document.createElement("td");
+                result.className = "cell-result";
+                result.textContent = String(row.result);
+
+                const actions = document.createElement("td");
+                actions.className = "row-actions";
+                [
+                    ["view", "View"],
+                    ["edit", "Edit"],
+                    ["delete", "Delete"]
+                ].forEach(function (pair) {
+                    const button = document.createElement("button");
+                    button.type = "button";
+                    button.className = pair[0] + "-btn";
+                    button.dataset.id = row.id;
+                    button.textContent = pair[1];
+                    actions.appendChild(button);
+                });
+
+                tr.appendChild(expr);
+                tr.appendChild(result);
+                tr.appendChild(actions);
+                tbody.appendChild(tr);
+            });
+        }
+
+        async function browse() {
+            try {
+                const response = await api("/calculations");
+                if (!response.ok) {
+                    show(errorBox, await errorTextOf(response));
+                    return;
+                }
+                renderRows(await response.json());
+            } catch (err) {
+                if (err.message !== "unauthorized") {
+                    show(errorBox, "Network error - please try again.");
+                }
+            }
+        }
+
+        // --- Add --------------------------------------------------------
+        document.getElementById("add-submit").addEventListener("click", async function () {
+            clearMessages();
+            const rawA = document.getElementById("add-a").value;
+            const rawB = document.getElementById("add-b").value;
+            const type = document.getElementById("add-type").value;
+
+            const problem = validateOperands(rawA, rawB, type);
+            if (problem) {
+                show(errorBox, problem);
+                return;
+            }
+
+            try {
+                const response = await api("/calculations", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ a: Number(rawA), b: Number(rawB), type: type })
+                });
+                if (response.status !== 201) {
+                    show(errorBox, await errorTextOf(response));
+                    return;
+                }
+                const created = await response.json();
+                show(successBox, "Saved. Result: " + created.result);
+                document.getElementById("add-a").value = "";
+                document.getElementById("add-b").value = "";
+                await browse();
+            } catch (err) {
+                if (err.message !== "unauthorized") {
+                    show(errorBox, "Network error - please try again.");
+                }
+            }
+        });
+
+        // --- Read -------------------------------------------------------
+        // Deliberately refetches GET /calculations/{id} instead of reusing
+        // the browsed copy, so the detail view reflects the row as the
+        // server sees it right now.
+        async function openDetail(id) {
+            clearMessages();
+            const response = await api("/calculations/" + id);
+            if (!response.ok) {
+                show(errorBox, await errorTextOf(response));
+                return;
+            }
+            const row = await response.json();
+            document.getElementById("detail-expr").textContent = "Expression: " + describe(row);
+            document.getElementById("detail-result").textContent = "Result: " + row.result;
+            document.getElementById("detail-id").textContent = "ID: " + row.id;
+            document.getElementById("detail-created").textContent = "Created: " + row.created_at;
+            document.getElementById("detail").style.display = "block";
+        }
+
+        document.getElementById("detail-close").addEventListener("click", function () {
+            hide(document.getElementById("detail"));
+        });
+
+        // --- Edit -------------------------------------------------------
+        async function openEdit(id) {
+            clearMessages();
+            const response = await api("/calculations/" + id);
+            if (!response.ok) {
+                show(errorBox, await errorTextOf(response));
+                return;
+            }
+            const row = await response.json();
+            editing = row;
+            document.getElementById("edit-target").textContent = "Editing " + describe(row);
+            document.getElementById("edit-a").value = row.a;
+            document.getElementById("edit-b").value = row.b;
+            document.getElementById("edit-type").value = row.type;
+            document.getElementById("edit-panel").style.display = "block";
+        }
+
+        function closeEdit() {
+            editing = null;
+            hide(document.getElementById("edit-panel"));
+        }
+
+        document.getElementById("edit-cancel").addEventListener("click", function () {
+            clearMessages();
+            closeEdit();
+        });
+
+        document.getElementById("edit-save").addEventListener("click", async function () {
+            clearMessages();
+            if (!editing) {
+                return;
+            }
+
+            const rawA = document.getElementById("edit-a").value;
+            const rawB = document.getElementById("edit-b").value;
+            const type = document.getElementById("edit-type").value;
+
+            const problem = validateOperands(rawA, rawB, type);
+            if (problem) {
+                show(errorBox, problem);
+                return;
+            }
+
+            // Only the fields the user actually changed go on the wire.
+            // That is what makes this a PATCH rather than a PUT wearing
+            // a different verb.
+            const changes = {};
+            if (Number(rawA) !== editing.a) {
+                changes.a = Number(rawA);
+            }
+            if (Number(rawB) !== editing.b) {
+                changes.b = Number(rawB);
+            }
+            if (type !== editing.type) {
+                changes.type = type;
+            }
+
+            if (Object.keys(changes).length === 0) {
+                show(errorBox, "No changes to save.");
+                return;
+            }
+
+            try {
+                const response = await api("/calculations/" + editing.id, {
+                    method: "PATCH",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify(changes)
+                });
+                if (!response.ok) {
+                    show(errorBox, await errorTextOf(response));
+                    return;
+                }
+                const updated = await response.json();
+                show(successBox, "Updated. Result: " + updated.result);
+                closeEdit();
+                await browse();
+            } catch (err) {
+                if (err.message !== "unauthorized") {
+                    show(errorBox, "Network error - please try again.");
+                }
+            }
+        });
+
+        // --- Delete -----------------------------------------------------
+        // Two-step inline confirmation instead of window.confirm: the
+        // guard is visible in the DOM, so it is assertable in a test and
+        // does not depend on browser dialog handling.
+        async function handleDelete(button, id) {
+            clearMessages();
+            if (button.dataset.confirming !== "yes") {
+                button.dataset.confirming = "yes";
+                button.textContent = "Confirm delete";
+                return;
+            }
+
+            try {
+                const response = await api("/calculations/" + id, { method: "DELETE" });
+                if (response.status !== 204) {
+                    show(errorBox, await errorTextOf(response));
+                    return;
+                }
+                show(successBox, "Calculation deleted.");
+                if (editing && editing.id === id) {
+                    closeEdit();
+                }
+                hide(document.getElementById("detail"));
+                await browse();
+            } catch (err) {
+                if (err.message !== "unauthorized") {
+                    show(errorBox, "Network error - please try again.");
+                }
+            }
+        }
+
+        // One delegated listener on the tbody rather than per-row
+        // handlers: rows are replaced wholesale on every browse, and
+        // rebinding three listeners per row would leak them.
+        document.getElementById("rows").addEventListener("click", function (event) {
+            const button = event.target.closest("button");
+            if (!button) {
+                return;
+            }
+            const id = button.dataset.id;
+            if (button.classList.contains("view-btn")) {
+                openDetail(id);
+            } else if (button.classList.contains("edit-btn")) {
+                openEdit(id);
+            } else if (button.classList.contains("delete-btn")) {
+                handleDelete(button, id);
+            }
+        });
+
+        document.getElementById("logout").addEventListener("click", logout);
+
+        if (token()) {
+            browse();
+        }
+    </script>
+</body>
+</html>
