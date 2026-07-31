@@ -188,3 +188,115 @@ def test_result_recomputes_from_stored_operands_on_read(client, alice):
     fetch_resp = client.get(f"/calculations/{created['id']}", headers=alice)
     assert fetch_resp.status_code == 200, fetch_resp.text
     assert fetch_resp.json()["result"] == 4.0
+
+# --- PATCH: partial edit -----------------------------------------------
+# PUT above proves full replacement works. These cover the half of the
+# Edit requirement that PUT cannot express: changing one field without
+# the client having to know or resend the other two.
+
+
+def test_patch_single_field_leaves_others_untouched(client, alice):
+    created = client.post(
+        "/calculations", json={"a": 6, "b": 7, "type": "multiply"}, headers=alice
+    ).json()
+    response = client.patch(
+        f"/calculations/{created['id']}", json={"b": 8}, headers=alice
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["a"] == 6.0
+    assert body["b"] == 8.0
+    assert body["type"] == "multiply"
+    assert body["result"] == 48.0
+
+
+def test_patch_type_only_recomputes_result(client, alice):
+    created = client.post(
+        "/calculations", json={"a": 20, "b": 4, "type": "add"}, headers=alice
+    ).json()
+    response = client.patch(
+        f"/calculations/{created['id']}", json={"type": "Divide"}, headers=alice
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["type"] == "divide"
+    assert body["result"] == 5.0
+
+
+def test_patch_persists_to_the_database(client, alice):
+    created = client.post(
+        "/calculations", json={"a": 1, "b": 1, "type": "add"}, headers=alice
+    ).json()
+    client.patch(f"/calculations/{created['id']}", json={"a": 41}, headers=alice)
+    refetched = client.get(f"/calculations/{created['id']}", headers=alice).json()
+    assert refetched["a"] == 41.0
+    assert refetched["result"] == 42.0
+
+
+def test_patch_zero_b_onto_stored_divide_is_400(client, alice):
+    """The rule the partial payload cannot see on its own: b=0 is fine
+    for an add, fatal for the divide this row already is."""
+    created = client.post(
+        "/calculations", json={"a": 9, "b": 3, "type": "divide"}, headers=alice
+    ).json()
+    response = client.patch(
+        f"/calculations/{created['id']}", json={"b": 0}, headers=alice
+    )
+    assert response.status_code == 400
+    assert "nonzero" in response.json()["error"]
+
+
+def test_patch_divide_type_onto_stored_zero_b_is_400(client, alice):
+    """The mirror case: b was already 0 under an add, and switching the
+    type to divide is what breaks the merged whole."""
+    created = client.post(
+        "/calculations", json={"a": 5, "b": 0, "type": "add"}, headers=alice
+    ).json()
+    response = client.patch(
+        f"/calculations/{created['id']}", json={"type": "divide"}, headers=alice
+    )
+    assert response.status_code == 400
+
+
+def test_patch_empty_body_is_400(client, alice):
+    created = client.post(
+        "/calculations", json={"a": 1, "b": 2, "type": "add"}, headers=alice
+    ).json()
+    response = client.patch(f"/calculations/{created['id']}", json={}, headers=alice)
+    assert response.status_code == 400
+    assert "at least one" in response.json()["error"]
+
+
+def test_patch_explicit_null_type_is_400(client, alice):
+    """Null is not a value you can set — it reaches the merge as None
+    and CalculationCreate refuses it."""
+    created = client.post(
+        "/calculations", json={"a": 1, "b": 2, "type": "add"}, headers=alice
+    ).json()
+    response = client.patch(
+        f"/calculations/{created['id']}", json={"type": None}, headers=alice
+    )
+    assert response.status_code == 400
+
+
+def test_patch_unknown_type_is_400(client, alice):
+    created = client.post(
+        "/calculations", json={"a": 1, "b": 2, "type": "add"}, headers=alice
+    ).json()
+    response = client.patch(
+        f"/calculations/{created['id']}", json={"type": "modulo"}, headers=alice
+    )
+    assert response.status_code == 400
+
+
+def test_patch_foreign_row_is_404(client, alice, bob):
+    foreign = client.post(
+        "/calculations", json={"a": 5, "b": 5, "type": "add"}, headers=bob
+    ).json()["id"]
+    response = client.patch(f"/calculations/{foreign}", json={"a": 1}, headers=alice)
+    assert response.status_code == 404
+
+
+def test_patch_requires_authentication(client):
+    response = client.patch(f"/calculations/{uuid.uuid4()}", json={"a": 1})
+    assert response.status_code == 401

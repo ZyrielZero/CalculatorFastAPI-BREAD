@@ -6,21 +6,28 @@ calculation belonging to someone else is indistinguishable from one
 that does not exist — both return the same 404, and the API never
 leaks which ids are taken.
 
-Edit is a PUT that replaces the three writable fields (a, b, type)
-through the same CalculationCreate validation as Add, so an update can
-never smuggle in a payload that creation would have refused.
+Edit comes in two shapes. PUT replaces all three writable fields
+(a, b, type); PATCH merges a partial payload onto the stored row. Both
+funnel the final field set through the same CalculationCreate
+validation as Add, so no update can smuggle in a payload that creation
+would have refused.
 """
 
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.auth.dependencies import get_current_active_user
 from app.database import get_db
 from app.models.calculation import Calculation
-from app.schemas.calculation import CalculationCreate, CalculationRead
+from app.schemas.calculation import (
+    CalculationCreate,
+    CalculationRead,
+    CalculationUpdate,
+)
 from app.schemas.user import UserRead
 
 router = APIRouter(prefix="/calculations", tags=["calculations"])
@@ -94,6 +101,45 @@ def edit_calculation(
     row.a = payload.a
     row.b = payload.b
     row.type = payload.type.value
+    db.commit()
+    db.refresh(row)
+    return CalculationRead.model_validate(row)
+
+
+@router.patch("/{calculation_id}", response_model=CalculationRead)
+def patch_calculation(
+    calculation_id: UUID,
+    payload: CalculationUpdate,
+    db: Session = Depends(get_db),
+    current_user: UserRead = Depends(get_current_active_user),
+) -> CalculationRead:
+    """Edit: merge a partial payload onto the stored row.
+
+    exclude_unset is what makes this a real PATCH — a field the client
+    never mentioned is absent from the dict entirely, so it keeps its
+    stored value instead of being overwritten with a default None.
+    """
+    row = _get_owned(db, calculation_id, current_user.id)
+    merged = {
+        "a": row.a,
+        "b": row.b,
+        "type": row.type,
+        **payload.model_dump(exclude_unset=True),
+    }
+    try:
+        validated = CalculationCreate.model_validate(merged)
+    except ValidationError as exc:
+        # The merged whole broke a rule the partial payload could not
+        # have seen on its own — most often a zero b landing on a row
+        # whose type is already divide.
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="; ".join(err["msg"] for err in exc.errors()),
+        ) from exc
+
+    row.a = validated.a
+    row.b = validated.b
+    row.type = validated.type.value
     db.commit()
     db.refresh(row)
     return CalculationRead.model_validate(row)

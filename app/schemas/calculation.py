@@ -40,6 +40,38 @@ class CalculationCreate(BaseModel):
         return self
 
 
+class CalculationUpdate(BaseModel):
+    """Partial update payload: any subset of the three writable fields.
+
+    Nothing is validated in isolation here beyond field types, because a
+    partial payload is not independently meaningful — whether b=0 is
+    legal depends on the type already stored on the row. The route
+    merges this onto the persisted values and re-validates the merged
+    whole through CalculationCreate, so PATCH and POST answer to exactly
+    one set of rules rather than two that can drift apart.
+    """
+
+    a: float | None = Field(default=None, allow_inf_nan=False)
+    b: float | None = Field(default=None, allow_inf_nan=False)
+    type: CalculationType | None = None
+
+    @field_validator("type", mode="before")
+    @classmethod
+    def normalize_type(cls, value: object) -> object:
+        # Same normalization as CalculationCreate: 'Divide' and 'divide'
+        # resolve alike, and non-strings (including an explicit null)
+        # pass through to be judged by the merge.
+        return value.lower() if isinstance(value, str) else value
+
+    @model_validator(mode="after")
+    def reject_empty_payload(self) -> "CalculationUpdate":
+        # An empty PATCH body is almost always a client bug; failing it
+        # loudly beats a 200 that silently changed nothing.
+        if not self.model_fields_set:
+            raise ValueError("supply at least one of: a, b, type")
+        return self
+
+
 class CalculationRead(BaseModel):
     """Outbound representation. result is populated from the model's
     computed property, so the serialized value always reflects the
