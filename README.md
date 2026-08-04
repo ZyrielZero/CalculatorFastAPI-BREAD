@@ -1,21 +1,23 @@
-# FastAPI Calculator — JWT Login & Registration Front-End
+# FastAPI Calculator — Calculation BREAD Front-End
 
 A FastAPI application pairing a web calculator with a secure user layer,
-built on SQLAlchemy 2.0, Pydantic v2, and bcrypt. This repository adds
-the authentication front-end: registration and login pages with
-client-side validation, JWT storage in the browser, and Playwright
-end-to-end tests driving both pages through their positive and negative
-paths — on top of the JWT routes and authenticated calculation BREAD
-endpoints from the previous module.
+built on SQLAlchemy 2.0, Pydantic v2, and bcrypt. This repository
+completes the calculation feature: a browser dashboard that Browses,
+Reads, Edits, Adds, and Deletes the logged-in user's calculations
+against the bearer-authenticated API, a `PATCH` endpoint for partial
+edits, client-side validation mirroring the Pydantic schemas, and a
+Playwright suite driving every operation through both its positive and
+negative paths — on top of the auth pages, JWT routes, and BREAD
+endpoints from the previous modules.
 
-Docker Hub: **<https://hub.docker.com/r/zyrielzero/calculator-frontend>**
+Docker Hub: **<https://hub.docker.com/r/zyrielzero/calculator-bread>**
 
 ```
-docker pull zyrielzero/calculator-frontend:latest
+docker pull zyrielzero/calculator-bread:latest
 docker run -p 8000:8000 \
   -e DATABASE_URL=postgresql://user:pass@host:5432/dbname \
   -e JWT_SECRET=<at-least-32-characters> \
-  zyrielzero/calculator-frontend:latest
+  zyrielzero/calculator-bread:latest
 ```
 
 On startup the app creates any missing tables against `DATABASE_URL`, so
@@ -101,13 +103,41 @@ does not exist.
 | -------------------- | ------ | -------------------------------------- | -------------------------- |
 | `/calculations`      | GET    | Browse the caller's calculations       | `200` + list               |
 | `/calculations/{id}` | GET    | Read one owned calculation             | `200` + `CalculationRead`  |
-| `/calculations/{id}` | PUT    | Edit operands and type, re-validated   | `200` + recomputed result  |
+| `/calculations/{id}` | PUT    | Edit: replace operands and type         | `200` + recomputed result  |
+| `/calculations/{id}` | PATCH  | Edit: merge a partial payload            | `200` + recomputed result  |
 | `/calculations`      | POST   | Add a calculation                      | `201` + `CalculationRead`  |
 | `/calculations/{id}` | DELETE | Delete one owned calculation           | `204`                      |
 
 Edits pass through the same `CalculationCreate` validation as creation,
 so an update can never store a payload creation would have refused
 (zero divisor on divide, unknown type, non-finite operands).
+
+### Partial edits (Module 14)
+
+`PUT` requires all three writable fields; `PATCH` accepts any subset.
+The interesting part is that `CalculationUpdate` validates almost
+nothing on its own, because a partial payload is not independently
+meaningful — whether `b: 0` is legal depends on the `type` already
+stored on the row. So the route merges the payload onto the persisted
+values and re-validates the merged whole through `CalculationCreate`:
+
+```
+stored:  {a: 9, b: 3, type: divide}
+patch:   {b: 0}
+merged:  {a: 9, b: 0, type: divide}   -> 400, zero divisor
+```
+
+```
+stored:  {a: 5, b: 0, type: add}
+patch:   {type: divide}
+merged:  {a: 5, b: 0, type: divide}   -> 400, same rule, other direction
+```
+
+`model_dump(exclude_unset=True)` is what makes this a real PATCH: a
+field the client never mentioned is absent from the dict entirely, so it
+keeps its stored value rather than being overwritten with a default
+`None`. An empty body is refused rather than answered with a `200` that
+changed nothing.
 
 ## Front-End Pages (Module 13)
 
@@ -140,6 +170,56 @@ number appearing at all is proof the stored credential authenticates —
 storage and use demonstrated in one step. Module 14 grows the full BREAD
 interface out of this call.
 
+## Calculations Dashboard (Module 14)
+
+`GET /dashboard` serves a single Jinja2 page that is the front end for
+every BREAD operation. The page is a static shell — the token lives in
+`localStorage` and only the browser can read it, so the server gates
+nothing here and every piece of data on screen arrives through the
+bearer-authenticated `/calculations` API.
+
+| UI element         | Operation | Request                     |
+| ------------------ | --------- | --------------------------- |
+| Table of rows      | Browse    | `GET /calculations`         |
+| **View** button    | Read      | `GET /calculations/{id}`    |
+| **Edit** panel     | Edit      | `PATCH /calculations/{id}`  |
+| Add form           | Add       | `POST /calculations`        |
+| **Delete** button  | Delete    | `DELETE /calculations/{id}` |
+
+Four design decisions worth naming:
+
+**Read refetches.** The View button issues `GET /calculations/{id}`
+rather than reusing the copy already in the browsed list, so the detail
+panel shows the row as the server sees it right now. It costs one
+request and makes the Read endpoint genuinely exercised rather than
+decorative.
+
+**Edit sends only what changed.** The panel remembers the row it loaded
+and diffs the form against it, so changing one operand puts one field on
+the wire. Saving an untouched form is caught client-side — an empty
+`PATCH` body would be a `400`, and there is no reason to spend a round
+trip learning that.
+
+**Delete confirms in the DOM.** The first click arms the button and
+relabels it "Confirm delete"; the second click sends the request. Using
+`window.confirm` would have put the guard in a browser dialog, which is
+invisible to assertions and needs special handling in Playwright. An
+inline state change is testable with the same locators as everything
+else.
+
+**Rows use one delegated listener.** The table is re-rendered wholesale
+after every mutation, so binding three handlers per row would leak a set
+on each browse. A single click listener on the `tbody` reads the target
+button's class and id instead.
+
+Client-side validation mirrors `CalculationCreate`: both operands
+required and finite, the operation restricted to the four known types,
+and a zero divisor refused on divide. Anything that clears those checks
+still faces Pydantic on the server, which remains the authority. A `401`
+from any call is treated as a logout — the token is cleared and the
+browser is sent to `/login` — rather than rendered as a raw error, and
+visiting `/dashboard` with no token redirects before the shell paints.
+
 ## Secret Management
 
 `app/config.py` reads `JWT_SECRET` from the environment (or a local
@@ -159,8 +239,35 @@ secret:
 
 ## End-to-End Tests
 
-`tests/e2e/test_auth_e2e.py` drives the real pages in Chromium against a
-live server:
+`tests/e2e/test_bread_e2e.py` drives the dashboard in Chromium against a
+live server. Every test registers and logs in a fresh uuid-suffixed
+user, which is not only collision avoidance: it means the browse table
+starts empty, so a row count is an exact assertion rather than a delta
+against whatever earlier tests left behind.
+
+- **Add** — positive: a valid submission renders a row with the result
+  the server computed. Negative: a blank operand and a divide by zero
+  are both stopped client-side, with the table left untouched.
+- **Browse** — positive: three saves produce three rows, oldest first,
+  each with its own result. Negative: a second account logging in from
+  the same browser sees an empty table, proving ownership isolation from
+  the UI side.
+- **Read** — positive: View opens the detail panel with the refetched
+  row, and Close hides it again.
+- **Edit** — positive: changing one operand sends a single-field
+  `PATCH`, and a page reload confirms the change reached the database.
+  Negative: an unchanged form, a divide-by-zero edit, and Cancel each
+  leave the row alone.
+- **Delete** — positive: the first click arms the button, the second
+  removes the row, and a reload confirms it is gone; deleting the middle
+  of three rows leaves the other two intact.
+- **Authorization** — negative: `/dashboard` with no token redirects to
+  `/login`; a forged token gets a `401` from `/calculations` and is
+  cleared rather than rendered around; logging out discards the
+  credential so a direct revisit bounces.
+
+`tests/e2e/test_auth_e2e.py` drives the register and login pages in the
+same style:
 
 - **Positive:** register with valid data and assert the success message;
   log in with correct credentials and assert the success message reports
@@ -187,9 +294,18 @@ Start the app (`docker compose up --build` or `python main.py` with
 3. `POST /calculations` with `{"a": 6, "b": 7, "type": "multiply"}` →
    `201` with `"result": 42.0`.
 4. `GET /calculations` lists the row; `PUT` with
-   `{"a": 84, "b": 2, "type": "divide"}` still yields `42.0`;
-   `DELETE` returns `204`; a re-read returns `404`.
+   `{"a": 84, "b": 2, "type": "divide"}` still yields `42.0`; `PATCH`
+   with `{"b": 4}` alone yields `21.0`; `DELETE` returns `204`; a
+   re-read returns `404`.
 5. Log out via the lock icon and retry `GET /calculations` → `401`.
+
+### Manual verification via the browser
+
+Open <http://localhost:8000/register>, create an account, log in at
+`/login`, and follow the **Go to my calculations** link. From
+`/dashboard` you can run all five operations against the same API
+Swagger exercises above — the dashboard sends the token Swagger's
+Authorize button holds.
 
 ## Setup and Run (Docker Compose)
 
@@ -248,8 +364,9 @@ tests exercise registration, uniqueness collisions, authentication,
 token resolution, and the active-user gate against a real Postgres —
 and, in `test_user_routes.py` and `test_calculation_routes.py`, drive
 the full HTTP stack through TestClient: register/login round trips
-verified in the database, the complete BREAD cycle, ownership isolation
-from two users' perspectives, and error paths for invalid payloads. The
+verified in the database, the complete BREAD cycle including the
+partial-edit merge rules, ownership isolation from two users'
+perspectives, and error paths for invalid payloads. The
 e2e fixture starts the app with the same interpreter running pytest, so
 results are stable locally and in CI.
 
@@ -283,4 +400,4 @@ tooling never enters the scan surface.
 
 **deploy** runs only on pushes to main after a clean scan. It builds and
 pushes the image to Docker Hub tagged `latest` and with the commit SHA:
-<https://hub.docker.com/r/zyrielzero/calculator-frontend>
+<https://hub.docker.com/r/zyrielzero/calculator-bread>
